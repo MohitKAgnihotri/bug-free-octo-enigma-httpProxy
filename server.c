@@ -14,17 +14,22 @@
 
 #define BACKLOG 100
 #define PORT_NUM 12345
+#define WEBSERVER_PORT 80
 
 
-int server_socket_fd;
+int proxy_server_socket_fd;
+int webserver_socket_fd = 0;
+
+char buffer_web_browser[BUFFER_SIZE];
+char buffer_web_server[BUFFER_SIZE];
+pthread_mutex_t mutex_request;
 
 int main(int argc, char *argv[])
 {
-    long int port, new_socket_fd;
-    pthread_attr_t pthread_client_attr;
-    pthread_t pthread;
+    long int port, client_socket_fd;
     socklen_t client_address_len;
     struct sockaddr_in client_address;
+    pid_t childpid;
 
     if (argc < 3)
     {
@@ -50,39 +55,37 @@ int main(int argc, char *argv[])
     }
 
     /*Create the server socket */
-    server_socket_fd = CreateServerSocket(hostname, port);
+    proxy_server_socket_fd = CreateServerSocket(hostname, port);
+    if (proxy_server_socket_fd < 0)
+    {
+        printf("Error creating server socket.\n");
+        exit(1);
+    }
 
     /*Setup the signal handler*/
     SetupSignalHandler();
-
-    /* Initialise pthread attribute to create detached threads. */
-    if (pthread_attr_init(&pthread_client_attr) != 0) {
-        perror("pthread_attr_init");
-        exit(1);
-    }
-    if (pthread_attr_setdetachstate(&pthread_client_attr, PTHREAD_CREATE_DETACHED) != 0) {
-        perror("pthread_attr_setdetachstate");
-        exit(1);
-    }
 
     while (1) {
 
         /* Accept connection to client. */
         client_address_len = sizeof (client_address);
-        new_socket_fd = accept(server_socket_fd, (struct sockaddr *)&client_address, &client_address_len);
-        if (new_socket_fd == -1) {
+        client_socket_fd = accept(proxy_server_socket_fd, (struct sockaddr *)&client_address, &client_address_len);
+        if (client_socket_fd == -1) {
             perror("accept");
             continue;
         }
 
-        printf("Client connected\n");
-        unsigned int *thread_arg = (unsigned int *) malloc(sizeof(unsigned int));
-        *thread_arg = new_socket_fd;
-        /* Create thread to serve connection to client. */
-        if (pthread_create(&pthread, &pthread_client_attr, pthread_routine, (void *)thread_arg) != 0) {
-            perror("pthread_create");
-            continue;
+        printf("[%s] - Connected to server\n", inet_ntoa(client_address.sin_addr));
+
+        if ((childpid = fork()) == 0)
+        {
+            while (1)
+            {
+                close(proxy_server_socket_fd);
+                handle_client_routine(client_socket_fd);
+            }
         }
+
     }
 
     return 0;
@@ -110,7 +113,6 @@ int hostname_to_ip(char * hostname , char* ip)
         strcpy(ip , inet_ntoa(*addr_list[i]) );
         return SUCCESS;
     }
-
     return FAILURE;
 }
 
@@ -123,7 +125,7 @@ int CreateServerSocket(char * hostname, long int port)
     if (hostname_to_ip(hostname , ip) != SUCCESS)
     {
         printf("Error in hostname_to_ip %s\n", hostname);
-        exit(1);
+        return FAILURE;
     }
 
     /* Initialise IPv4 address. */
@@ -136,19 +138,19 @@ int CreateServerSocket(char * hostname, long int port)
     if ((socket_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
     {
         perror("socket");
-        exit(1);
+        return FAILURE;
     }
 
     /* Bind address to socket. */
     if (bind(socket_fd, (struct sockaddr *)&address, sizeof (address)) == -1) {
         perror("bind");
-        exit(1);
+        return FAILURE;
     }
 
     /* Listen on socket. */
     if (listen(socket_fd, BACKLOG) == -1) {
         perror("listen");
-        exit(1);
+        return FAILURE;
     }
 
     // Configure server socket
@@ -172,24 +174,133 @@ void SetupSignalHandler() {/* Assign signal handlers to signals. */
     }
 }
 
-void *pthread_routine(void *arg)
+void handle_client_routine(int client_socket)
 {
 
-    char buff[1024];
-    time_t ticks;
+    printf("[%d] - Client connected\n", client_socket);
 
-    int client_socket = *(int*) arg;
-    free(arg);
+    pthread_attr_t pthread_client_attr;
+    pthread_t pthread_service_web_browser;
+    pthread_t pthread_service_web_server;
 
-    ticks = time(NULL);
-    snprintf(buff, sizeof(buff), "%.24s\r\n", ctime(&ticks));
-    write(client_socket, buff, strlen(buff));
+    pthread_mutex_init(&mutex_request, NULL);
 
-    return NULL;
+    /* Initialise pthread attribute to create detached threads. */
+    if (pthread_attr_init(&pthread_client_attr) != 0) {
+        perror("pthread_attr_init");
+        exit(1);
+    }
+
+    if (pthread_attr_setdetachstate(&pthread_client_attr, PTHREAD_CREATE_DETACHED) != 0) {
+        perror("pthread_attr_setdetachstate");
+        exit(1);
+    }
+
+    /* Create thread to serve connection to client. */
+    if (pthread_create(&pthread_service_web_browser, &pthread_client_attr, pthread_web_browser_routine, (void *)&client_socket) != 0)
+    {
+        perror("pthread_create");
+        exit(1);
+    }
+
+    /* Create thread to serve connection to client. */
+    if (pthread_create(&pthread_service_web_server, &pthread_client_attr, pthread_web_server_routine, (void *)NULL) != 0)
+    {
+        perror("pthread_create");
+        exit(1);
+    }
+
+    pthread_join(pthread_service_web_browser, NULL);
+    pthread_join(pthread_service_web_server, NULL);
+
+
+    exit(0);
 }
+
+
+void *pthread_web_browser_routine( void *arg)
+{
+
+    printf("[] - pthread_web_browser_routine\n");
+    int client_socket = *(int *)arg;
+
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+
+    while(1)
+    {
+        // Read from web browser
+        pthread_mutex_lock(&mutex_request);
+        ssize_t  read_size = recv(client_socket, buffer_web_browser, BUFFER_SIZE, MSG_WAITALL);
+        if (read_size == 0)
+        {
+            printf("[%s] - Disconnected from web browser\n","Browser->Server");
+            close(client_socket);
+            break;
+        }
+        else if (read_size == -1)
+        {
+            perror("read");
+            close(client_socket);
+            break;
+        }
+
+        printf("[%s] - Received from web browser: %s\n", "Browser->Server",buffer_web_browser);
+
+        if (!strstr(buffer_web_browser, "pages.cpsc.ucalgary.ca")) {
+            printf("Request is not for this server\n");
+            continue;
+        }
+
+        if (!webserver_socket_fd)
+        {
+            printf("[%s] - Webserver socket not created; Creating\n", "Browser->Server");
+            webserver_socket_fd = CreateServerSocket("pages.cpsc.ucalgary.ca", WEBSERVER_PORT);
+            if (webserver_socket_fd == FAILURE)
+            {
+                printf("[%s] - Webserver socket creation failed\n", "Browser->Server");
+                break;
+            }
+            setsockopt(webserver_socket_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+        }
+
+        // Send to web server
+        ssize_t  write_size = send(webserver_socket_fd, buffer_web_browser, strlen(buffer_web_browser), 0);
+        if(write_size == -1)
+        {
+            perror("write");
+            close(webserver_socket_fd);
+            webserver_socket_fd = 0;
+            break;
+        }
+        else if (write_size == 0)
+        {
+            printf("[%s] - Disconnected from web server\n", "Browser->Server");
+            close(webserver_socket_fd);
+            webserver_socket_fd = 0;
+            break;
+        }
+        else
+        {
+            printf("[%s] - Sent to web server: %s\n", "Browser->Server", buffer_web_browser);
+        }
+        pthread_mutex_unlock(&mutex_request);
+    }
+    pthread_exit(NULL);
+}
+
+void *pthread_web_server_routine( void *arg)
+{
+    printf("[] - pthread_web_browser_routine\n");
+    pthread_exit(NULL);
+}
+
+
 
 void signal_handler(int signal_number)
 {
-    close(server_socket_fd);
+    close(proxy_server_socket_fd);
     exit(0);
 }
