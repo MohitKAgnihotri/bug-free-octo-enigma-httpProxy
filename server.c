@@ -10,6 +10,7 @@
 #include <netdb.h>
 #include<arpa/inet.h>
 #include <errno.h>
+#include <stdbool.h>
 #include "server.h"
 
 #define BACKLOG 100
@@ -116,6 +117,41 @@ int hostname_to_ip(char * hostname , char* ip)
     return FAILURE;
 }
 
+
+int ConnectToServer(char * hostname, long int port)
+{
+    struct sockaddr_in address;
+    int socket_fd;
+    char ip[16];
+
+    if (hostname_to_ip(hostname , ip) != SUCCESS)
+    {
+        printf("Error in hostname_to_ip %s\n", hostname);
+        return FAILURE;
+    }
+
+    /* Initialise IPv4 address. */
+    memset(&address, 0, sizeof (address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = inet_addr(ip);
+
+    /* Create TCP socket. */
+    if ((socket_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
+    {
+        perror("socket");
+        return FAILURE;
+    }
+
+    /* Connect to socket with server address. */
+    if (connect(socket_fd, (struct sockaddr *)&address, sizeof address) == -1)
+    {
+        perror("connect");
+        return FAILURE;
+    }
+    return socket_fd;
+}
+
 int CreateServerSocket(char * hostname, long int port)
 {
     struct sockaddr_in address;
@@ -191,11 +227,6 @@ void handle_client_routine(int client_socket)
         exit(1);
     }
 
-    if (pthread_attr_setdetachstate(&pthread_client_attr, PTHREAD_CREATE_DETACHED) != 0) {
-        perror("pthread_attr_setdetachstate");
-        exit(1);
-    }
-
     /* Create thread to serve connection to client. */
     if (pthread_create(&pthread_service_web_browser, &pthread_client_attr, pthread_web_browser_routine, (void *)&client_socket) != 0)
     {
@@ -213,7 +244,7 @@ void handle_client_routine(int client_socket)
     pthread_join(pthread_service_web_browser, NULL);
     pthread_join(pthread_service_web_server, NULL);
 
-
+    printf("[Exit] - pthread_web_browser_routine\n");
     exit(0);
 }
 
@@ -221,43 +252,60 @@ void handle_client_routine(int client_socket)
 void *pthread_web_browser_routine( void *arg)
 {
 
-    printf("[] - pthread_web_browser_routine\n");
+    printf("[Entry] - pthread_web_browser_routine\n");
     int client_socket = *(int *)arg;
+    bool is_request_received = false;
 
     struct timeval tv;
-    tv.tv_sec = 5;
+    tv.tv_sec = 1;
     tv.tv_usec = 0;
     setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
     while(1)
     {
+
         // Read from web browser
+        memset(buffer_web_browser, 0, BUFFER_SIZE);
         pthread_mutex_lock(&mutex_request);
-        ssize_t  read_size = recv(client_socket, buffer_web_browser, BUFFER_SIZE, MSG_WAITALL);
-        if (read_size == 0)
-        {
-            printf("[%s] - Disconnected from web browser\n","Browser->Server");
-            close(client_socket);
-            break;
-        }
-        else if (read_size == -1)
-        {
-            perror("read");
-            close(client_socket);
-            break;
-        }
 
-        printf("[%s] - Received from web browser: %s\n", "Browser->Server",buffer_web_browser);
+        if (!is_request_received) {
+            ssize_t read_size = recv(client_socket, buffer_web_browser, BUFFER_SIZE, MSG_WAITALL);
+            if (read_size == 0) {
+                printf("[%s] - Disconnected from web browser\n", "Browser->Server");
+                close(client_socket);
+                break;
+            }
+            else if (read_size == -1)
+            {
+                if ( errno == EAGAIN)
+                {
+                    printf("[%s] - Timeout\n", "Browser->Server");
+                    pthread_mutex_unlock(&mutex_request);
+                    is_request_received = false;
+                    continue;
+                }
+                else
+                {
+                    perror("read");
+                    close(client_socket);
+                    break;
+                }
+            }
 
-        if (!strstr(buffer_web_browser, "pages.cpsc.ucalgary.ca")) {
-            printf("Request is not for this server\n");
-            continue;
+            printf("[%s] - Received from web browser: %s\n", "Browser->Server", buffer_web_browser);
+            if (!strstr(buffer_web_browser, "pages.cpsc.ucalgary.ca")) {
+                printf("Request is not for this server\n");
+                pthread_mutex_unlock(&mutex_request);
+                is_request_received = false;
+                continue;
+            }
+            is_request_received = true;
         }
 
         if (!webserver_socket_fd)
         {
             printf("[%s] - Webserver socket not created; Creating\n", "Browser->Server");
-            webserver_socket_fd = CreateServerSocket("pages.cpsc.ucalgary.ca", WEBSERVER_PORT);
+            webserver_socket_fd = ConnectToServer("pages.cpsc.ucalgary.ca", WEBSERVER_PORT);
             if (webserver_socket_fd == FAILURE)
             {
                 printf("[%s] - Webserver socket creation failed\n", "Browser->Server");
@@ -267,33 +315,34 @@ void *pthread_web_browser_routine( void *arg)
         }
 
         // Send to web server
-        ssize_t  write_size = send(webserver_socket_fd, buffer_web_browser, strlen(buffer_web_browser), 0);
-        if(write_size == -1)
-        {
-            perror("write");
-            close(webserver_socket_fd);
-            webserver_socket_fd = 0;
-            break;
-        }
-        else if (write_size == 0)
-        {
-            printf("[%s] - Disconnected from web server\n", "Browser->Server");
-            close(webserver_socket_fd);
-            webserver_socket_fd = 0;
-            break;
-        }
-        else
-        {
-            printf("[%s] - Sent to web server: %s\n", "Browser->Server", buffer_web_browser);
+        if (is_request_received) {
+            ssize_t write_size = send(webserver_socket_fd, buffer_web_browser, strlen(buffer_web_browser), 0);
+            if (write_size == -1) {
+                perror("write");
+                close(webserver_socket_fd);
+                webserver_socket_fd = 0;
+                break;
+            } else if (write_size == 0) {
+                printf("[%s] - Disconnected from web server\n", "Browser->Server");
+                close(webserver_socket_fd);
+                webserver_socket_fd = 0;
+                break;
+            } else {
+                printf("[%s] - Sent to web server: %s\n", "Browser->Server", buffer_web_browser);
+                is_request_received = false;
+            }
         }
         pthread_mutex_unlock(&mutex_request);
     }
+    pthread_mutex_unlock(&mutex_request);
+    printf("[Exiting] - pthread_web_browser_routine\n");
     pthread_exit(NULL);
 }
 
 void *pthread_web_server_routine( void *arg)
 {
-    printf("[] - pthread_web_browser_routine\n");
+    printf("[Entry] - pthread_web_server_routine\n");
+    printf("[Exit] - pthread_web_server_routine\n");
     pthread_exit(NULL);
 }
 
