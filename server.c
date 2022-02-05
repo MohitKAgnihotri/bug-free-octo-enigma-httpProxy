@@ -265,7 +265,7 @@ void *pthread_web_browser_routine(void *arg)
             break;
         }
 
-        ssize_t write_size = send(webserver_socket_fd, buffer_web_browser, strlen(buffer_web_browser), 0);
+        ssize_t write_size = send(webserver_socket_fd, buffer_web_browser, read_size, 0);
         if (write_size == -1) {
             perror("write");
             break;
@@ -297,7 +297,7 @@ void *pthread_web_browser_routine(void *arg)
                 printf("[%s] - Received from web server: %s\n", "Server->Browser", buffer_web_server);
             }
 
-            write_size = send(client_socket, buffer_web_server, strlen(buffer_web_server), 0);
+            write_size = send(client_socket, buffer_web_server, read_size, 0);
             if (write_size == -1)
             {
                 perror("write");
