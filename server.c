@@ -10,8 +10,6 @@
 #include <netdb.h>
 #include<arpa/inet.h>
 #include <errno.h>
-#include <stdbool.h>
-#include <semaphore.h>
 #include "server.h"
 
 #define BACKLOG 100
@@ -22,12 +20,10 @@
 int proxy_server_socket_fd;
 
 
-
 int main(int argc, char *argv[]) {
     long int port, client_socket_fd;
     socklen_t client_address_len;
     struct sockaddr_in client_address;
-    pid_t childpid;
 
     if (argc < 3) {
         printf("Usage: %s <server_name> <port>\n", argv[0]);
@@ -57,7 +53,6 @@ int main(int argc, char *argv[]) {
         printf("Error creating server socket.\n");
         exit(1);
     }
-
 
     pthread_attr_t pthread_client_attr;
     pthread_t pthread_service_web_browser;
@@ -98,15 +93,12 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
     }
-
-    return 0;
 }
 
 
 int hostname_to_ip(char *hostname, char *ip) {
     struct hostent *he;
     struct in_addr **addr_list;
-    int i;
 
     if ((he = gethostbyname(hostname)) == NULL) {
         // get the host info
@@ -115,13 +107,8 @@ int hostname_to_ip(char *hostname, char *ip) {
     }
 
     addr_list = (struct in_addr **) he->h_addr_list;
-
-    for (i = 0; addr_list[i] != NULL; i++) {
-        //Return the first one;
-        strcpy(ip, inet_ntoa(*addr_list[i]));
-        return SUCCESS;
-    }
-    return FAILURE;
+    strcpy(ip, inet_ntoa(*addr_list[0]));
+    return SUCCESS;
 }
 
 
@@ -210,8 +197,7 @@ void SetupSignalHandler() {/* Assign signal handlers to signals. */
     }
 }
 
-void *pthread_web_browser_routine(void *arg)
-{
+void *pthread_web_browser_routine(void *arg) {
 
     char buffer_web_browser[BUFFER_SIZE];
     char buffer_web_server[BUFFER_SIZE];
@@ -231,8 +217,7 @@ void *pthread_web_browser_routine(void *arg)
         memset(buffer_web_browser, 0, BUFFER_SIZE);
 
         ssize_t read_size = recv(client_socket, buffer_web_browser, BUFFER_SIZE, MSG_WAITALL);
-        if (read_size == 0)
-        {
+        if (read_size == 0) {
             printf("[%s] - Disconnected from web browser\n", "Browser->Server");
             break;
         } else if (read_size == -1) {
@@ -252,8 +237,7 @@ void *pthread_web_browser_routine(void *arg)
         }
 
         memset(buffer_web_server, 0, BUFFER_SIZE);
-        if(webserver_socket_fd)
-        {
+        if (webserver_socket_fd) {
             close(webserver_socket_fd);
         }
 
@@ -276,12 +260,10 @@ void *pthread_web_browser_routine(void *arg)
             printf("[%s] - Sent to web server: %s\n", "Browser->Server", buffer_web_browser);
         }
 
-        do
-        {
+        do {
             memset(buffer_web_server, 0, BUFFER_SIZE);
             read_size = recv(webserver_socket_fd, buffer_web_server, BUFFER_SIZE, MSG_WAITALL);
-            if (read_size == 0)
-            {
+            if (read_size == 0) {
                 printf("[%s] - Disconnected from web server\n", "Server->Browser");
                 break;
             } else if (read_size == -1) {
@@ -292,22 +274,18 @@ void *pthread_web_browser_routine(void *arg)
                     perror("read");
                     break;
                 }
-            } else
-            {
+            } else {
                 printf("[%s] - Received from web server: %s\n", "Server->Browser", buffer_web_server);
             }
 
             write_size = send(client_socket, buffer_web_server, read_size, 0);
-            if (write_size == -1)
-            {
+            if (write_size == -1) {
                 perror("write");
                 break;
-            } else if (write_size == 0)
-            {
+            } else if (write_size == 0) {
                 printf("[%s] - Disconnected from web browser\n", "Server->Browser");
                 break;
-            } else
-            {
+            } else {
                 printf("[%s] - Sent to web browser: %s\n", "Server->Browser", buffer_web_server);
             }
         } while (1);
