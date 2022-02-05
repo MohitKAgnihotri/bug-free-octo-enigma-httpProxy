@@ -11,6 +11,7 @@
 #include<arpa/inet.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <semaphore.h>
 #include "server.h"
 
 #define BACKLOG 100
@@ -19,21 +20,16 @@
 
 
 int proxy_server_socket_fd;
-int webserver_socket_fd = 0;
 
-char buffer_web_browser[BUFFER_SIZE];
-char buffer_web_server[BUFFER_SIZE];
-pthread_mutex_t mutex_request;
 
-int main(int argc, char *argv[])
-{
+
+int main(int argc, char *argv[]) {
     long int port, client_socket_fd;
     socklen_t client_address_len;
     struct sockaddr_in client_address;
     pid_t childpid;
 
-    if (argc < 3)
-    {
+    if (argc < 3) {
         printf("Usage: %s <server_name> <port>\n", argv[0]);
         exit(1);
     }
@@ -45,21 +41,35 @@ int main(int argc, char *argv[])
     port = PORT_NUM;
     port = strtol(argv[2], &endptr, 10);
     if (endptr == argv[2]) {
-        printf("Invalid number: %s \n",argv[2]);
+        printf("Invalid number: %s \n", argv[2]);
         exit(2);
     } else if (*endptr) {
-        printf("Trailing characters after number: %s \n",argv[2]);
+        printf("Trailing characters after number: %s \n", argv[2]);
         exit(1);
     } else if (errno == ERANGE) {
-        printf("Number out of range: %s \n",argv[2]);
+        printf("Number out of range: %s \n", argv[2]);
         exit(1);
     }
 
     /*Create the server socket */
     proxy_server_socket_fd = CreateServerSocket(hostname, port);
-    if (proxy_server_socket_fd < 0)
-    {
+    if (proxy_server_socket_fd < 0) {
         printf("Error creating server socket.\n");
+        exit(1);
+    }
+
+
+    pthread_attr_t pthread_client_attr;
+    pthread_t pthread_service_web_browser;
+
+    /* Initialise pthread attribute to create detached threads. */
+    if (pthread_attr_init(&pthread_client_attr) != 0) {
+        perror("pthread_attr_init");
+        exit(1);
+    }
+
+    if (pthread_attr_setdetachstate(&pthread_client_attr, PTHREAD_CREATE_DETACHED) != 0) {
+        perror("pthread_attr_setdetachstate");
         exit(1);
     }
 
@@ -69,8 +79,8 @@ int main(int argc, char *argv[])
     while (1) {
 
         /* Accept connection to client. */
-        client_address_len = sizeof (client_address);
-        client_socket_fd = accept(proxy_server_socket_fd, (struct sockaddr *)&client_address, &client_address_len);
+        client_address_len = sizeof(client_address);
+        client_socket_fd = accept(proxy_server_socket_fd, (struct sockaddr *) &client_address, &client_address_len);
         if (client_socket_fd == -1) {
             perror("accept");
             continue;
@@ -78,29 +88,27 @@ int main(int argc, char *argv[])
 
         printf("[%s] - Connected to server\n", inet_ntoa(client_address.sin_addr));
 
-        if ((childpid = fork()) == 0)
-        {
-            while (1)
-            {
-                close(proxy_server_socket_fd);
-                handle_client_routine(client_socket_fd);
-            }
-        }
+        unsigned int *thread_arg = (unsigned int *) malloc(sizeof(unsigned int));
+        *thread_arg = client_socket_fd;
 
+        /* Create thread to serve connection to client. */
+        if (pthread_create(&pthread_service_web_browser, &pthread_client_attr, pthread_web_browser_routine,
+                           (void *) thread_arg) != 0) {
+            perror("pthread_create");
+            exit(1);
+        }
     }
 
     return 0;
 }
 
 
-int hostname_to_ip(char * hostname , char* ip)
-{
+int hostname_to_ip(char *hostname, char *ip) {
     struct hostent *he;
     struct in_addr **addr_list;
     int i;
 
-    if ( (he = gethostbyname( hostname ) ) == NULL)
-    {
+    if ((he = gethostbyname(hostname)) == NULL) {
         // get the host info
         herror("gethostbyname");
         return FAILURE;
@@ -108,77 +116,69 @@ int hostname_to_ip(char * hostname , char* ip)
 
     addr_list = (struct in_addr **) he->h_addr_list;
 
-    for(i = 0; addr_list[i] != NULL; i++)
-    {
+    for (i = 0; addr_list[i] != NULL; i++) {
         //Return the first one;
-        strcpy(ip , inet_ntoa(*addr_list[i]) );
+        strcpy(ip, inet_ntoa(*addr_list[i]));
         return SUCCESS;
     }
     return FAILURE;
 }
 
 
-int ConnectToServer(char * hostname, long int port)
-{
+int ConnectToServer(char *hostname, long int port) {
     struct sockaddr_in address;
     int socket_fd;
     char ip[16];
 
-    if (hostname_to_ip(hostname , ip) != SUCCESS)
-    {
+    if (hostname_to_ip(hostname, ip) != SUCCESS) {
         printf("Error in hostname_to_ip %s\n", hostname);
         return FAILURE;
     }
 
     /* Initialise IPv4 address. */
-    memset(&address, 0, sizeof (address));
+    memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
     address.sin_addr.s_addr = inet_addr(ip);
 
     /* Create TCP socket. */
-    if ((socket_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
-    {
+    if ((socket_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         perror("socket");
         return FAILURE;
     }
 
     /* Connect to socket with server address. */
-    if (connect(socket_fd, (struct sockaddr *)&address, sizeof address) == -1)
-    {
+    if (connect(socket_fd, (struct sockaddr *) &address, sizeof address) == -1) {
         perror("connect");
         return FAILURE;
     }
     return socket_fd;
 }
 
-int CreateServerSocket(char * hostname, long int port)
-{
+int CreateServerSocket(char *hostname, long int port) {
     struct sockaddr_in address;
     int socket_fd;
     char ip[16];
 
-    if (hostname_to_ip(hostname , ip) != SUCCESS)
-    {
+    if (hostname_to_ip(hostname, ip) != SUCCESS) {
         printf("Error in hostname_to_ip %s\n", hostname);
         return FAILURE;
     }
 
     /* Initialise IPv4 address. */
-    memset(&address, 0, sizeof (address));
+    memset(&address, 0, sizeof(address));
     address.sin_family = AF_INET;
     address.sin_port = htons(port);
     address.sin_addr.s_addr = inet_addr(ip);
 
     /* Create TCP socket. */
-    if ((socket_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1)
-    {
+    if ((socket_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         perror("socket");
         return FAILURE;
     }
 
     /* Bind address to socket. */
-    if (bind(socket_fd, (struct sockaddr *)&address, sizeof (address)) == -1) {
+    if (bind(socket_fd, (struct sockaddr *) &address, sizeof(address)) == -1) {
         perror("bind");
         return FAILURE;
     }
@@ -210,146 +210,119 @@ void SetupSignalHandler() {/* Assign signal handlers to signals. */
     }
 }
 
-void handle_client_routine(int client_socket)
+void *pthread_web_browser_routine(void *arg)
 {
 
-    printf("[%d] - Client connected\n", client_socket);
-
-    pthread_attr_t pthread_client_attr;
-    pthread_t pthread_service_web_browser;
-    pthread_t pthread_service_web_server;
-
-    pthread_mutex_init(&mutex_request, NULL);
-
-    /* Initialise pthread attribute to create detached threads. */
-    if (pthread_attr_init(&pthread_client_attr) != 0) {
-        perror("pthread_attr_init");
-        exit(1);
-    }
-
-    /* Create thread to serve connection to client. */
-    if (pthread_create(&pthread_service_web_browser, &pthread_client_attr, pthread_web_browser_routine, (void *)&client_socket) != 0)
-    {
-        perror("pthread_create");
-        exit(1);
-    }
-
-    /* Create thread to serve connection to client. */
-    if (pthread_create(&pthread_service_web_server, &pthread_client_attr, pthread_web_server_routine, (void *)NULL) != 0)
-    {
-        perror("pthread_create");
-        exit(1);
-    }
-
-    pthread_join(pthread_service_web_browser, NULL);
-    pthread_join(pthread_service_web_server, NULL);
-
-    printf("[Exit] - pthread_web_browser_routine\n");
-    exit(0);
-}
-
-
-void *pthread_web_browser_routine( void *arg)
-{
+    char buffer_web_browser[BUFFER_SIZE];
+    char buffer_web_server[BUFFER_SIZE];
+    int webserver_socket_fd = 0;
 
     printf("[Entry] - pthread_web_browser_routine\n");
-    int client_socket = *(int *)arg;
-    bool is_request_received = false;
+    int client_socket = *(int *) arg;
+    free(arg);
 
     struct timeval tv;
     tv.tv_sec = 1;
     tv.tv_usec = 0;
-    setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+    setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, (const char *) &tv, sizeof tv);
 
-    while(1)
-    {
-
+    while (1) {
         // Read from web browser
         memset(buffer_web_browser, 0, BUFFER_SIZE);
-        pthread_mutex_lock(&mutex_request);
 
-        if (!is_request_received) {
-            ssize_t read_size = recv(client_socket, buffer_web_browser, BUFFER_SIZE, MSG_WAITALL);
-            if (read_size == 0) {
-                printf("[%s] - Disconnected from web browser\n", "Browser->Server");
-                close(client_socket);
+        ssize_t read_size = recv(client_socket, buffer_web_browser, BUFFER_SIZE, MSG_WAITALL);
+        if (read_size == 0)
+        {
+            printf("[%s] - Disconnected from web browser\n", "Browser->Server");
+            break;
+        } else if (read_size == -1) {
+            if ((errno == EAGAIN) || (errno == EINTR)) {
+                printf("[%s] - Timeout\n", "Browser->Server");
+                continue;
+            } else {
+                perror("read");
                 break;
             }
-            else if (read_size == -1)
+        }
+
+        printf("[%s] - Received from web browser: %s\n", "Browser->Server", buffer_web_browser);
+        if (!strstr(buffer_web_browser, "pages.cpsc.ucalgary.ca")) {
+            printf("Request is not for this server\n");
+            break;
+        }
+
+        memset(buffer_web_server, 0, BUFFER_SIZE);
+        if(webserver_socket_fd)
+        {
+            close(webserver_socket_fd);
+        }
+
+        // Connect to the server
+        printf("[%s] - Webserver socket not created; Creating\n", "Browser->Server");
+        webserver_socket_fd = ConnectToServer("pages.cpsc.ucalgary.ca", WEBSERVER_PORT);
+        if (webserver_socket_fd == FAILURE) {
+            printf("[%s] - Webserver socket creation failed\n", "Browser->Server");
+            break;
+        }
+
+        ssize_t write_size = send(webserver_socket_fd, buffer_web_browser, strlen(buffer_web_browser), 0);
+        if (write_size == -1) {
+            perror("write");
+            break;
+        } else if (write_size == 0) {
+            printf("[%s] - Disconnected from web server\n", "Browser->Server");
+            break;
+        } else {
+            printf("[%s] - Sent to web server: %s\n", "Browser->Server", buffer_web_browser);
+        }
+
+        do
+        {
+            memset(buffer_web_server, 0, BUFFER_SIZE);
+            read_size = recv(webserver_socket_fd, buffer_web_server, BUFFER_SIZE, MSG_WAITALL);
+            if (read_size == 0)
             {
-                if ( errno == EAGAIN)
-                {
-                    printf("[%s] - Timeout\n", "Browser->Server");
-                    pthread_mutex_unlock(&mutex_request);
-                    is_request_received = false;
+                printf("[%s] - Disconnected from web server\n", "Server->Browser");
+                break;
+            } else if (read_size == -1) {
+                if ((errno == EAGAIN) || (errno == EINTR)) {
+                    printf("[%s] - Timeout\n", "Server->Browser");
                     continue;
-                }
-                else
-                {
+                } else {
                     perror("read");
-                    close(client_socket);
                     break;
                 }
-            }
-
-            printf("[%s] - Received from web browser: %s\n", "Browser->Server", buffer_web_browser);
-            if (!strstr(buffer_web_browser, "pages.cpsc.ucalgary.ca")) {
-                printf("Request is not for this server\n");
-                pthread_mutex_unlock(&mutex_request);
-                is_request_received = false;
-                continue;
-            }
-            is_request_received = true;
-        }
-
-        if (!webserver_socket_fd)
-        {
-            printf("[%s] - Webserver socket not created; Creating\n", "Browser->Server");
-            webserver_socket_fd = ConnectToServer("pages.cpsc.ucalgary.ca", WEBSERVER_PORT);
-            if (webserver_socket_fd == FAILURE)
+            } else
             {
-                printf("[%s] - Webserver socket creation failed\n", "Browser->Server");
-                break;
+                printf("[%s] - Received from web server: %s\n", "Server->Browser", buffer_web_server);
             }
-            setsockopt(webserver_socket_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
-        }
 
-        // Send to web server
-        if (is_request_received) {
-            ssize_t write_size = send(webserver_socket_fd, buffer_web_browser, strlen(buffer_web_browser), 0);
-            if (write_size == -1) {
+            write_size = send(client_socket, buffer_web_server, strlen(buffer_web_server), 0);
+            if (write_size == -1)
+            {
                 perror("write");
-                close(webserver_socket_fd);
-                webserver_socket_fd = 0;
                 break;
-            } else if (write_size == 0) {
-                printf("[%s] - Disconnected from web server\n", "Browser->Server");
-                close(webserver_socket_fd);
-                webserver_socket_fd = 0;
+            } else if (write_size == 0)
+            {
+                printf("[%s] - Disconnected from web browser\n", "Server->Browser");
                 break;
-            } else {
-                printf("[%s] - Sent to web server: %s\n", "Browser->Server", buffer_web_browser);
-                is_request_received = false;
+            } else
+            {
+                printf("[%s] - Sent to web browser: %s\n", "Server->Browser", buffer_web_server);
             }
-        }
-        pthread_mutex_unlock(&mutex_request);
+        } while (1);
     }
-    pthread_mutex_unlock(&mutex_request);
+
+    if (client_socket)
+        close(client_socket);
+    if (webserver_socket_fd)
+        close(webserver_socket_fd);
+
     printf("[Exiting] - pthread_web_browser_routine\n");
     pthread_exit(NULL);
 }
 
-void *pthread_web_server_routine( void *arg)
-{
-    printf("[Entry] - pthread_web_server_routine\n");
-    printf("[Exit] - pthread_web_server_routine\n");
-    pthread_exit(NULL);
-}
-
-
-
-void signal_handler(int signal_number)
-{
+void signal_handler(int signal_number) {
     close(proxy_server_socket_fd);
     exit(0);
 }
